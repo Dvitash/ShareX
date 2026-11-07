@@ -26,10 +26,8 @@
 using ShareX.HelpersLib;
 using ShareX.ScreenCaptureLib;
 using ShareX.ScreenCaptureLib.Presentation.RegionCapture;
-using SkiaSharp;
 using System.Drawing;
 using System.Threading.Tasks;
-using Bitmap = SkiaSharp.SKBitmap;
 
 namespace ShareX
 {
@@ -47,48 +45,22 @@ namespace ShareX
 
         protected async Task<TaskMetadata> ExecuteRegionCaptureAvaloniaAsync(TaskSettings taskSettings)
         {
-            Screenshot screenshot = TaskHelpers.GetScreenshot(taskSettings);
-            screenshot.CaptureCursor = false;
-
             bool activeMonitorMode = taskSettings.CaptureSettings.RegionCaptureOptions.ActiveMonitorMode;
             Rectangle screenBounds = activeMonitorMode
                 ? CaptureHelpers.GetActiveScreenBounds()
                 : CaptureHelpers.GetScreenBounds();
 
-            // The capture request owns this bitmap and disposes it, so no copy is needed.
-            SKBitmap frozenScreenshot = activeMonitorMode
-                ? screenshot.CaptureActiveMonitor()
-                : screenshot.CaptureFullscreen();
-
-            SKBitmap cursorBitmap = null;
-            Point cursorPosition = Point.Empty;
-
-            if (taskSettings.CaptureSettings.ShowCursor)
-            {
-                CursorData cursorData = new CursorData();
-                if (cursorData.IsVisible)
-                {
-                    using Bitmap cursor = cursorData.ToBitmap(frozenScreenshot, screenBounds.Location);
-                    cursorBitmap = cursor.Copy();
-                    cursorPosition = new Point(
-                        cursorData.DrawPosition.X - screenBounds.X,
-                        cursorData.DrawPosition.Y - screenBounds.Y);
-                }
-            }
-
             AvaloniaRegionCaptureRequest request = new AvaloniaRegionCaptureRequest
             {
-                Screenshot = frozenScreenshot,
                 ScreenBounds = screenBounds,
                 RegionCaptureOptions = taskSettings.CaptureSettingsReference.RegionCaptureOptions,
                 ImageEditorOptions = taskSettings.ToolsSettingsReference.ImageEditorOptions,
                 EnableAnnotations = !taskSettings.AdvancedSettings.RegionCaptureDisableAnnotation,
-                AllowMultipleRegions = true,
-                CursorBitmap = cursorBitmap,
-                CursorPosition = cursorPosition
+                AllowMultipleRegions = true
             };
 
-            AvaloniaRegionCaptureResult result = await RegionCaptureIntegration.CaptureAsync(request);
+            AvaloniaRegionCaptureResult result = await RegionCaptureIntegration.CaptureAsync(request,
+                pending => GrabScreen(pending, taskSettings, activeMonitorMode));
             if (result == null)
             {
                 return null;
@@ -108,6 +80,31 @@ namespace ShareX
             }
 
             return metadata;
+        }
+
+        // Runs on a worker thread while the capture window is built.
+        private static void GrabScreen(AvaloniaRegionCaptureRequest request, TaskSettings taskSettings, bool activeMonitorMode)
+        {
+            Screenshot screenshot = TaskHelpers.GetScreenshot(taskSettings);
+            screenshot.CaptureCursor = false;
+
+            // The capture request owns this bitmap and disposes it, so no copy is needed.
+            request.Screenshot = activeMonitorMode
+                ? screenshot.CaptureActiveMonitor()
+                : screenshot.CaptureFullscreen();
+
+            if (taskSettings.CaptureSettings.ShowCursor)
+            {
+                CursorData cursorData = new CursorData();
+                if (cursorData.IsVisible)
+                {
+                    Rectangle screenBounds = request.ScreenBounds;
+                    request.CursorBitmap = cursorData.ToBitmap(request.Screenshot, screenBounds.Location);
+                    request.CursorPosition = new Point(
+                        cursorData.DrawPosition.X - screenBounds.X,
+                        cursorData.DrawPosition.Y - screenBounds.Y);
+                }
+            }
         }
     }
 }

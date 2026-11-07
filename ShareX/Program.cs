@@ -151,6 +151,7 @@ internal static class Program
         }
 
         DebugHelper.WriteLine("Startup time: {0} ms", _startTimer.ElapsedMilliseconds);
+        ShareX.ScreenCaptureLib.Presentation.RegionCapture.RegionCaptureIntegration.Prewarm();
         await ApplicationCommandLine.ExecuteInitialAsync();
 
         if (ApplicationState.Settings.ActionsToolbarRunAtStartup)

@@ -25,6 +25,7 @@
 
 using SkiaSharp;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.Numerics;
@@ -42,6 +43,16 @@ public static class WindowsImageInterop
         ref BITMAPINFOHEADER header, uint usage);
     [DllImport("gdi32.dll")]
     private static extern bool GdiFlush();
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern bool PatBlt(IntPtr dc, int x, int y, int width, int height, uint rasterOperation);
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorEnumProc callback, IntPtr data);
+    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr dc, ref RECT bounds, IntPtr data);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeBitmap
     {
@@ -77,7 +88,8 @@ public static class WindowsImageInterop
     public static SKBitmap Capture(Rectangle rectangle, Action<IntPtr> drawCursor = null, IntPtr window = default)
     {
         if (rectangle.Width <= 0 || rectangle.Height <= 0) return null;
-        if (window == IntPtr.Zero) window = NativeMethods.GetDesktopWindow();
+        IntPtr desktop = NativeMethods.GetDesktopWindow();
+        if (window == IntPtr.Zero) window = desktop;
         IntPtr source = NativeMethods.GetWindowDC(window);
         if (source == IntPtr.Zero) throw new Win32Exception();
         IntPtr dc = IntPtr.Zero, handle = IntPtr.Zero, previous = IntPtr.Zero;
@@ -92,9 +104,15 @@ public static class WindowsImageInterop
             handle = NativeMethods.CreateCompatibleBitmap(source, rectangle.Width, rectangle.Height);
             if (handle == IntPtr.Zero) throw new Win32Exception();
             previous = NativeMethods.SelectObject(dc, handle);
-            if (!NativeMethods.BitBlt(dc, 0, 0, rectangle.Width, rectangle.Height, source,
+            if (window == desktop)
+            {
+                BlitMonitors(dc, source, rectangle);
+            }
+            else if (!NativeMethods.BitBlt(dc, 0, 0, rectangle.Width, rectangle.Height, source,
                 rectangle.X, rectangle.Y, NativeRasterOperation.SourceCopy | NativeRasterOperation.CaptureBlt))
+            {
                 throw new Win32Exception();
+            }
             drawCursor?.Invoke(dc);
             // GetDIBits requires the bitmap to be deselected.
             NativeMethods.SelectObject(dc, previous);
@@ -119,6 +137,34 @@ public static class WindowsImageInterop
             if (handle != IntPtr.Zero) NativeMethods.DeleteObject(handle);
             if (dc != IntPtr.Zero) NativeMethods.DeleteDC(dc);
             NativeMethods.ReleaseDC(window, source);
+        }
+    }
+
+    // Copies only the parts of the rectangle that monitors cover. On a desktop with differently sized or
+    // offset monitors the bounding rectangle has dead areas, and a single blit over it costs more than
+    // filling those areas black and blitting each monitor.
+    private static void BlitMonitors(IntPtr destination, IntPtr source, Rectangle rectangle)
+    {
+        List<Rectangle> parts = [];
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr monitor, IntPtr dc, ref RECT bounds, IntPtr data) =>
+        {
+            Rectangle part = Rectangle.Intersect(rectangle,
+                Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom));
+            if (!part.IsEmpty) parts.Add(part);
+            return true;
+        }, IntPtr.Zero);
+
+        if (parts.Count != 1 || parts[0] != rectangle)
+        {
+            if (!PatBlt(destination, 0, 0, rectangle.Width, rectangle.Height, (uint)TernaryRasterOperations.BLACKNESS))
+                throw new Win32Exception();
+        }
+
+        foreach (Rectangle part in parts)
+        {
+            if (!NativeMethods.BitBlt(destination, part.X - rectangle.X, part.Y - rectangle.Y, part.Width, part.Height, source,
+                part.X, part.Y, NativeRasterOperation.SourceCopy | NativeRasterOperation.CaptureBlt))
+                throw new Win32Exception();
         }
     }
 
@@ -179,7 +225,7 @@ public static class WindowsImageInterop
         using SKBitmap black = DrawNative(size, SKColors.Black, draw);
         using SKBitmap white = DrawNative(size, SKColors.White, draw);
         using SKBitmap composited = background == null ? null : DrawNative(size, SKColors.Black, draw,
-            canvas => canvas.DrawBitmap(background, -position.X, -position.Y));
+            canvas => DrawBackgroundPatch(canvas, background, position, size));
         SKBitmap result = SkiaImageHelpers.CreateBitmap(size.Width, size.Height);
         using SkiaPixelBuffer dark = new(black, true, PixelAccess.ReadOnly);
         using SkiaPixelBuffer light = new(white, true, PixelAccess.ReadOnly);
@@ -200,6 +246,18 @@ public static class WindowsImageInterop
                 (byte)Math.Min(255, d.Green * 255 / alpha), (byte)Math.Min(255, d.Red * 255 / alpha), (byte)alpha));
         }
         return result;
+    }
+
+    private static void DrawBackgroundPatch(SKCanvas canvas, SKBitmap background, Point position, Size size)
+    {
+        // Drawing the whole background makes Skia copy every pixel of it first, which on a
+        // full-desktop screenshot costs more than the rest of the cursor work. Draw only the patch under the icon.
+        SKRectI patch = SKRectI.Intersect(SKRectI.Create(position.X, position.Y, size.Width, size.Height),
+            SKRectI.Create(background.Width, background.Height));
+        if (patch.IsEmpty) return;
+        using SKBitmap subset = new();
+        if (!background.ExtractSubset(subset, patch)) return;
+        canvas.DrawBitmap(subset, patch.Left - position.X, patch.Top - position.Y);
     }
 
     public static System.Drawing.Icon ToIcon(this SKBitmap bitmap)

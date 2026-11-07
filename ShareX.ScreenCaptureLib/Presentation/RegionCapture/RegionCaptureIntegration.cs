@@ -31,6 +31,7 @@ using ShareX.ImageEditor.Integration;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 
 namespace ShareX.ScreenCaptureLib.Presentation.RegionCapture;
@@ -50,9 +51,50 @@ public static class RegionCaptureIntegration
         LastRegionRectangles = regions;
     }
 
-    public static Task<AvaloniaRegionCaptureResult?> CaptureAsync(AvaloniaRegionCaptureRequest request)
+    /// <summary>
+    /// Builds and discards a region capture window once, in the background, so the first capture after startup
+    /// doesn't pay for loading its XAML, styles and editor types while the user waits.
+    /// </summary>
+    public static void Prewarm()
+    {
+        AvaloniaBootstrapper.EnsureInitialized();
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            try
+            {
+                ImageEditorIntegration.Initialize();
+
+                // Default options: the user's options could lock the cursor (active monitor mode) when the window is built.
+                AvaloniaRegionCaptureRequest request = new AvaloniaRegionCaptureRequest
+                {
+                    Screenshot = new SkiaSharp.SKBitmap(1, 1),
+                    ScreenBounds = new Rectangle(0, 0, 1, 1),
+                    RegionCaptureOptions = new RegionCaptureOptions(),
+                    ImageEditorOptions = new ImageEditorOptions()
+                };
+
+                // Never shown; closing it disposes the request's bitmap and view model.
+                new RegionCaptureWindow(request).Close();
+            }
+            catch (Exception ex)
+            {
+                ShareX.HelpersLib.DebugHelper.WriteException(ex, "Region capture prewarm failed.");
+            }
+        }, DispatcherPriority.Background);
+    }
+
+    /// <param name="request">Capture options. Ownership of its bitmaps transfers to the capture window.</param>
+    /// <param name="grab">
+    /// Optional screen grab that fills <see cref="AvaloniaRegionCaptureRequest.Screenshot"/> and the cursor. It runs on a
+    /// worker thread while the UI thread builds the capture window, so the two overlap.
+    /// </param>
+    public static Task<AvaloniaRegionCaptureResult?> CaptureAsync(AvaloniaRegionCaptureRequest request,
+        Action<AvaloniaRegionCaptureRequest>? grab = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+
+        Task grabTask = grab == null ? Task.CompletedTask : Task.Run(() => grab(request));
 
         try
         {
@@ -60,9 +102,7 @@ public static class RegionCaptureIntegration
         }
         catch (Exception ex)
         {
-            request.Screenshot.Dispose();
-            request.CursorBitmap?.Dispose();
-            return Task.FromException<AvaloniaRegionCaptureResult?>(ex);
+            return FailAsync(request, grabTask, ex);
         }
 
         TaskCompletionSource<AvaloniaRegionCaptureResult?> completion =
@@ -76,14 +116,14 @@ public static class RegionCaptureIntegration
             {
                 ImageEditorIntegration.Initialize();
                 window = new RegionCaptureWindow(request);
+                await grabTask;
                 completion.TrySetResult(await window.CaptureAsync());
             }
             catch (Exception ex)
             {
                 if (window == null || !window.IsVisible)
                 {
-                    request.Screenshot.Dispose();
-                    request.CursorBitmap?.Dispose();
+                    await DisposeBitmapsAsync(request, grabTask);
                 }
 
                 completion.TrySetException(ex);
@@ -91,6 +131,30 @@ public static class RegionCaptureIntegration
         });
 
         return completion.Task;
+    }
+
+    private static async Task<AvaloniaRegionCaptureResult?> FailAsync(AvaloniaRegionCaptureRequest request, Task grabTask,
+        Exception exception)
+    {
+        await DisposeBitmapsAsync(request, grabTask);
+        ExceptionDispatchInfo.Throw(exception);
+        return null;
+    }
+
+    // Waits for a pending grab first, so bitmaps it creates after a failure are still released.
+    private static async Task DisposeBitmapsAsync(AvaloniaRegionCaptureRequest request, Task grabTask)
+    {
+        try
+        {
+            await grabTask;
+        }
+        catch
+        {
+            // The caller reports the failure; only the cleanup matters here.
+        }
+
+        request.Screenshot?.Dispose();
+        request.CursorBitmap?.Dispose();
     }
 
     /// <summary>

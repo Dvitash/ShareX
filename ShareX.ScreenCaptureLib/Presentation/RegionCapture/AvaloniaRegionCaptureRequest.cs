@@ -33,8 +33,11 @@ namespace ShareX.ScreenCaptureLib.Presentation.RegionCapture;
 
 public sealed class AvaloniaRegionCaptureRequest
 {
-    /// <summary>Frozen screenshot. Ownership transfers to the capture window.</summary>
-    public required SKBitmap Screenshot { get; init; }
+    /// <summary>
+    /// Frozen screenshot. Ownership transfers to the capture window. Set it before calling
+    /// <see cref="RegionCaptureIntegration.CaptureAsync"/>, or let the grab passed to that method set it.
+    /// </summary>
+    public SKBitmap Screenshot { get; set; } = null!;
 
     /// <summary>Physical-pixel desktop bounds represented by <see cref="Screenshot"/>.</summary>
     public required Rectangle ScreenBounds { get; init; }
@@ -52,8 +55,8 @@ public sealed class AvaloniaRegionCaptureRequest
     public bool AllowMultipleRegions { get; init; }
 
     /// <summary>Optional captured cursor bitmap. Ownership transfers to the capture window.</summary>
-    public SKBitmap? CursorBitmap { get; init; }
+    public SKBitmap? CursorBitmap { get; set; }
 
     /// <summary>Cursor draw position in screenshot pixel coordinates.</summary>
-    public Point CursorPosition { get; init; }
+    public Point CursorPosition { get; set; }
 }
