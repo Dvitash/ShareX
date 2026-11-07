@@ -27,6 +27,7 @@ using SkiaSharp;
 using System;
 using System.ComponentModel;
 using System.Drawing;
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace ShareX.HelpersLib;
@@ -79,17 +80,46 @@ public static class WindowsImageInterop
         if (window == IntPtr.Zero) window = NativeMethods.GetDesktopWindow();
         IntPtr source = NativeMethods.GetWindowDC(window);
         if (source == IntPtr.Zero) throw new Win32Exception();
+        IntPtr dc = IntPtr.Zero, handle = IntPtr.Zero, previous = IntPtr.Zero;
+        SKBitmap result = null;
         try
         {
-            return DrawNative(rectangle.Size, SKColors.Black, dc =>
-            {
-                if (!NativeMethods.BitBlt(dc, 0, 0, rectangle.Width, rectangle.Height, source,
-                    rectangle.X, rectangle.Y, NativeRasterOperation.SourceCopy | NativeRasterOperation.CaptureBlt))
-                    throw new Win32Exception();
-                drawCursor?.Invoke(dc);
-            });
+            // Blit into a device-compatible bitmap and read it once with GetDIBits straight into the result.
+            // A DIB section needs an erase pass and a Skia copy of the whole frame, which on a large
+            // multi-monitor desktop costs more than the blit itself.
+            dc = NativeMethods.CreateCompatibleDC(source);
+            if (dc == IntPtr.Zero) throw new Win32Exception();
+            handle = NativeMethods.CreateCompatibleBitmap(source, rectangle.Width, rectangle.Height);
+            if (handle == IntPtr.Zero) throw new Win32Exception();
+            previous = NativeMethods.SelectObject(dc, handle);
+            if (!NativeMethods.BitBlt(dc, 0, 0, rectangle.Width, rectangle.Height, source,
+                rectangle.X, rectangle.Y, NativeRasterOperation.SourceCopy | NativeRasterOperation.CaptureBlt))
+                throw new Win32Exception();
+            drawCursor?.Invoke(dc);
+            // GetDIBits requires the bitmap to be deselected.
+            NativeMethods.SelectObject(dc, previous);
+            previous = IntPtr.Zero;
+
+            result = new(new SKImageInfo(rectangle.Width, rectangle.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul));
+            BITMAPINFOHEADER header = new(rectangle.Width, -rectangle.Height, 32) { biSize = 40, biSizeImage = checked((uint)rectangle.Width * (uint)rectangle.Height * 4) };
+            if (GetDIBits(source, handle, 0, (uint)rectangle.Height, result.GetPixels(), ref header, 0) != rectangle.Height)
+                throw new Win32Exception();
+            // Device bitmaps leave alpha undefined and GDI mask operations can clear it.
+            SetOpaque(result);
+            return result;
         }
-        finally { NativeMethods.ReleaseDC(window, source); }
+        catch
+        {
+            result?.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (previous != IntPtr.Zero) NativeMethods.SelectObject(dc, previous);
+            if (handle != IntPtr.Zero) NativeMethods.DeleteObject(handle);
+            if (dc != IntPtr.Zero) NativeMethods.DeleteDC(dc);
+            NativeMethods.ReleaseDC(window, source);
+        }
     }
 
     private static unsafe SKBitmap DrawNative(Size size, SKColor background, Action<IntPtr> draw, Action<SKCanvas> drawBackground = null)
@@ -181,10 +211,17 @@ public static class WindowsImageInterop
 
     private static unsafe void SetOpaque(SKBitmap bitmap)
     {
-        for (int y = 0; y < bitmap.Height; y++)
+        // Read the size once: SKBitmap.Width and Height are native calls, too slow for a per-pixel loop.
+        byte* pixels = (byte*)bitmap.GetPixels();
+        int width = bitmap.Width, height = bitmap.Height, rowBytes = bitmap.RowBytes;
+        Vector<uint> alpha = new(0xFF000000);
+        for (int y = 0; y < height; y++)
         {
-            byte* row = (byte*)bitmap.GetPixels() + y * bitmap.RowBytes;
-            for (int x = 0; x < bitmap.Width; x++) row[x * 4 + 3] = 255;
+            // Bgra8888 is little-endian, so alpha is the high byte of each pixel.
+            Span<uint> row = new(pixels + (long)y * rowBytes, width);
+            Span<Vector<uint>> vectors = MemoryMarshal.Cast<uint, Vector<uint>>(row);
+            for (int i = 0; i < vectors.Length; i++) vectors[i] |= alpha;
+            for (int i = vectors.Length * Vector<uint>.Count; i < row.Length; i++) row[i] |= 0xFF000000;
         }
         bitmap.NotifyPixelsChanged();
     }

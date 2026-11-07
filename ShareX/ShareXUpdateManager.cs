@@ -44,7 +44,8 @@ namespace ShareX
             }
             else
             {
-                return new GitHubUpdateChecker("ShareX", "ShareX")
+                // Fork builds update from the fork's releases so they keep the fork's fixes.
+                return new GitHubUpdateChecker("Dvitash", "ShareX")
                 {
                     IsPortable = StartupOptions.Portable,
                     IncludePreRelease = UpdateChannel == UpdateChannel.PreRelease,

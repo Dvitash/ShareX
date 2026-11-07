@@ -55,13 +55,10 @@ namespace ShareX
                 ? CaptureHelpers.GetActiveScreenBounds()
                 : CaptureHelpers.GetScreenBounds();
 
-            SKBitmap frozenScreenshot;
-            using (Bitmap canvas = activeMonitorMode
+            // The capture request owns this bitmap and disposes it, so no copy is needed.
+            SKBitmap frozenScreenshot = activeMonitorMode
                 ? screenshot.CaptureActiveMonitor()
-                : screenshot.CaptureFullscreen())
-            {
-                frozenScreenshot = canvas.Copy();
-            }
+                : screenshot.CaptureFullscreen();
 
             SKBitmap cursorBitmap = null;
             Point cursorPosition = Point.Empty;
@@ -97,23 +94,20 @@ namespace ShareX
                 return null;
             }
 
-            using (result.Image)
+            // GetSnapshot returns a bitmap nothing else references, so the task metadata takes it as is.
+            TaskMetadata metadata = new TaskMetadata(result.Image);
+
+            if (result.ImageModified)
             {
-                Bitmap output = result.Image.Copy();
-                TaskMetadata metadata = new TaskMetadata(output);
-
-                if (result.ImageModified)
-                {
-                    AllowAnnotation = false;
-                }
-
-                if (result.WindowInfo != null)
-                {
-                    metadata.UpdateInfo(result.WindowInfo);
-                }
-
-                return metadata;
+                AllowAnnotation = false;
             }
+
+            if (result.WindowInfo != null)
+            {
+                metadata.UpdateInfo(result.WindowInfo);
+            }
+
+            return metadata;
         }
     }
 }
