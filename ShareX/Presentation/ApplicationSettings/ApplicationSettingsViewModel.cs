@@ -256,6 +256,12 @@ public sealed class ApplicationSettingsViewModel : INotifyPropertyChanged, IDisp
 
     public bool CanEditTheme => !UseSystemTheme;
 
+    public bool CompactMode
+    {
+        get => Settings.ThemeOptions.CompactMode;
+        set => SetSetting(Settings.ThemeOptions.CompactMode, value, x => Settings.ThemeOptions.CompactMode = x);
+    }
+
     public void RefreshThemeSettings()
     {
         OnPropertyChanged(nameof(UseSystemTheme));
